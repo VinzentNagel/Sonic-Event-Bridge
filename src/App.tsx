@@ -3,30 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  LayoutDashboard, 
-  AlertCircle, 
-  Users, 
-  Calendar, 
-  Settings, 
-  Menu, 
-  X,
-  Radio,
-  Bell,
-  Search,
-  ChevronRight,
-  ShieldAlert,
-  Activity,
-  Map,
-  MessageSquare,
-  Clock,
-  ArrowUpRight,
-  Plus
-} from 'lucide-react';
-
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, MouseEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   LayoutDashboard, 
@@ -48,11 +25,16 @@ import {
   ArrowUpRight,
   Plus,
   ArrowLeft,
+  FileText,
+  Megaphone,
+  Send,
+  Share2,
+  MousePointer2,
+  Maximize2,
+  ArrowRight,
   CheckCircle2,
   Wifi,
   Zap,
-  Maximize2,
-  MousePointer2,
   Layers,
   Info,
   Trash2,
@@ -62,7 +44,12 @@ import { MapContainer, TileLayer, FeatureGroup, Polygon, Marker as LeafletMarker
 import { EditControl } from 'react-leaflet-draw';
 import L from 'leaflet';
 import 'leaflet-geometryutil';
+import 'leaflet.heat';
 import { GoogleGenAI, Type } from "@google/genai";
+import 'leaflet/dist/leaflet.css';
+import 'leaflet-draw/dist/leaflet.draw.css';
+import { useMap } from 'react-leaflet';
+import { BroadcastPage } from './components/BroadcastPage';
 
 // Fix Leaflet icon issue
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -71,6 +58,57 @@ L.Icon.Default.mergeOptions({
   iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
 });
+
+const HeatmapLayer = ({ points }: { points: [number, number, number][] }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (!points || points.length === 0) return;
+    const heatLayer = (L as any).heatLayer(points, {
+      radius: 35,
+      blur: 20,
+      maxZoom: 18,
+      max: 1.0,
+      gradient: {
+        0.2: '#3b82f6', // blue
+        0.4: '#06b6d4', // cyan
+        0.6: '#10b981', // emerald
+        0.8: '#f59e0b', // amber
+        1.0: '#ef4444'  // red
+      }
+    }).addTo(map);
+    return () => {
+      map.removeLayer(heatLayer);
+    };
+  }, [map, points]);
+  return null;
+};
+
+const MapAutoCenter = ({ polygon, padding = [50, 50] }: { polygon: [number, number][] | null, padding?: [number, number] }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (polygon && polygon.length > 0) {
+      const bounds = L.latLngBounds(polygon);
+      map.fitBounds(bounds, { padding });
+    }
+  }, [map, polygon, padding]);
+  return null;
+};
+
+const VenueMask = ({ polygon }: { polygon: [number, number][] | null }) => {
+  if (!polygon || polygon.length === 0) return null;
+  const outerBounds: [number, number][] = [[90, -180], [90, 180], [-90, 180], [-90, -180]];
+  return (
+    <Polygon
+      positions={[outerBounds, polygon]}
+      pathOptions={{
+        fillColor: 'white',
+        fillOpacity: 1,
+        color: 'white',
+        weight: 0
+      }}
+    />
+  );
+};
 
 type EventStatus = 'Live' | 'Scheduled' | 'Archived' | 'Draft';
 
@@ -82,6 +120,9 @@ interface Event {
   startDate: string;
   endDate: string;
   type?: string;
+  venuePolygon?: [number, number][];
+  nodes?: {id: number, x: number, y: number, status: 'online' | 'warning' | 'offline'}[];
+  placedElements?: {id: number, type: string, name: string, x: number, y: number}[];
 }
 
 const getEventStatus = (startDate: string, endDate: string): EventStatus => {
@@ -100,8 +141,52 @@ const getEventStatus = (startDate: string, endDate: string): EventStatus => {
 };
 
 export default function App() {
+  const today = new Date().toISOString().split('T')[0];
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
+  const [dashboardPage, setDashboardPage] = useState<'live' | 'network' | 'crowd' | 'safety' | 'nodes' | 'reports' | 'broadcast'>('live');
+  const [crowdBlobs, setCrowdBlobs] = useState<{id: number, x: number, y: number, r: number, intensity: 'low' | 'med' | 'high' | 'critical'}[]>([]);
+  const [coverageGaps, setCoverageGaps] = useState<{id: number, x: number, y: number, r: number, reason: string}[]>([]);
+  const [meshPulse, setMeshPulse] = useState(0);
+
+  useEffect(() => {
+    if (selectedEvent) {
+      if (selectedEvent.venuePolygon) setVenuePolygon(selectedEvent.venuePolygon);
+      if (selectedEvent.nodes) setNodes(selectedEvent.nodes);
+      if (selectedEvent.placedElements) setPlacedElements(selectedEvent.placedElements);
+    }
+  }, [selectedEvent]);
+
+  useEffect(() => {
+    if (selectedEvent && dashboardPage === 'live') {
+      // Initialize crowd blobs
+      const initialBlobs = [
+        { id: 1, x: 30, y: 40, r: 15, intensity: 'high' as const },
+        { id: 2, x: 70, y: 60, r: 20, intensity: 'med' as const },
+        { id: 3, x: 50, y: 30, r: 12, intensity: 'low' as const },
+        { id: 4, x: 20, y: 80, r: 18, intensity: 'med' as const },
+        { id: 5, x: 85, y: 20, r: 10, intensity: 'critical' as const },
+      ];
+      setCrowdBlobs(initialBlobs);
+
+      const initialGaps = [
+        { id: 1, x: 55, y: 75, r: 12, reason: 'Coverage Gap: Sector D' },
+        { id: 2, x: 15, y: 25, r: 8, reason: 'Mesh Bridge Required' },
+      ];
+      setCoverageGaps(initialGaps);
+
+      const interval = setInterval(() => {
+        setCrowdBlobs(prev => prev.map(blob => ({
+          ...blob,
+          x: blob.x + (Math.random() - 0.5) * 0.5,
+          y: blob.y + (Math.random() - 0.5) * 0.5,
+        })));
+        setMeshPulse(p => (p + 1) % 100);
+      }, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [selectedEvent, dashboardPage]);
   const [isCreatingEvent, setIsCreatingEvent] = useState(false);
   const [creationStep, setCreationStep] = useState(1);
   const [events, setEvents] = useState<Event[]>([
@@ -112,7 +197,24 @@ export default function App() {
       attendance: '14,282',
       startDate: '2026-06-21',
       endDate: '2026-06-23',
-      type: 'Music Festival'
+      type: 'Music Festival',
+      venuePolygon: [
+        [52.5200, 13.4050],
+        [52.5210, 13.4050],
+        [52.5210, 13.4070],
+        [52.5200, 13.4070]
+      ],
+      nodes: [
+        { id: 1, x: 20, y: 30, status: 'online' },
+        { id: 2, x: 50, y: 50, status: 'online' },
+        { id: 3, x: 80, y: 70, status: 'online' },
+        { id: 4, x: 30, y: 80, status: 'online' },
+        { id: 5, x: 70, y: 20, status: 'online' }
+      ],
+      placedElements: [
+        { id: 1, type: 'Stage', name: 'Main Stage', x: 50, y: 10 },
+        { id: 2, type: 'Entrance', name: 'North Gate', x: 10, y: 50 }
+      ]
     },
     { 
       id: 2, 
@@ -121,7 +223,18 @@ export default function App() {
       attendance: '0',
       startDate: '2026-12-15',
       endDate: '2026-12-15',
-      type: 'Conference'
+      type: 'Conference',
+      venuePolygon: [
+        [48.2082, 16.3738],
+        [48.2092, 16.3738],
+        [48.2092, 16.3758],
+        [48.2082, 16.3758]
+      ],
+      nodes: [
+        { id: 1, x: 40, y: 40, status: 'online' },
+        { id: 2, x: 60, y: 60, status: 'online' }
+      ],
+      placedElements: []
     },
     { 
       id: 3, 
@@ -130,7 +243,18 @@ export default function App() {
       attendance: '5,400',
       startDate: '2025-11-10',
       endDate: '2025-11-12',
-      type: 'Conference'
+      type: 'Conference',
+      venuePolygon: [
+        [37.7749, -122.4194],
+        [37.7759, -122.4194],
+        [37.7759, -122.4174],
+        [37.7749, -122.4174]
+      ],
+      nodes: [
+        { id: 1, x: 25, y: 25, status: 'online' },
+        { id: 2, x: 75, y: 75, status: 'online' }
+      ],
+      placedElements: []
     },
   ]);
 
@@ -159,6 +283,34 @@ export default function App() {
   // Step 4 Data (AI Nodes)
   const [nodes, setNodes] = useState<{id: number, x: number, y: number, status: 'online' | 'warning' | 'offline'}[]>([]);
   const [isAiPlanning, setIsAiPlanning] = useState(false);
+
+  const getLatLngFromXY = (x: number, y: number, polygon: [number, number][]) => {
+    if (!polygon || polygon.length === 0) return { lat: 0, lng: 0 };
+    const lats = polygon.map(p => p[0]);
+    const lngs = polygon.map(p => p[1]);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs);
+    const maxLng = Math.max(...lngs);
+    
+    const lat = maxLat - (y / 100) * (maxLat - minLat);
+    const lng = minLng + (x / 100) * (maxLng - minLng);
+    return { lat, lng };
+  };
+
+  const getXYFromLatLng = (lat: number, lng: number, polygon: [number, number][]) => {
+    if (!polygon || polygon.length === 0) return { x: 0, y: 0 };
+    const lats = polygon.map(p => p[0]);
+    const lngs = polygon.map(p => p[1]);
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs);
+    const maxLng = Math.max(...lngs);
+    
+    const x = ((lng - minLng) / (maxLng - minLng)) * 100;
+    const y = ((maxLat - lat) / (maxLat - minLat)) * 100;
+    return { x, y };
+  };
 
   const handleCreateEvent = () => {
     setIsCreatingEvent(true);
@@ -271,7 +423,10 @@ export default function App() {
       attendance: newEventData.attendance || '0',
       startDate: newEventData.startDate,
       endDate: newEventData.endDate || newEventData.startDate,
-      type: newEventData.type
+      type: newEventData.type,
+      venuePolygon: venuePolygon || undefined,
+      nodes: nodes,
+      placedElements: placedElements
     };
     setEvents([...events, newEvent]);
     setSelectedEvent(newEvent);
@@ -285,7 +440,7 @@ export default function App() {
     setVenueSize(null);
   };
 
-  const deleteEvent = (id: number, e: React.MouseEvent) => {
+  const deleteEvent = (id: number, e: MouseEvent) => {
     e.stopPropagation();
     setEvents(events.filter(ev => ev.id !== id));
   };
@@ -308,6 +463,76 @@ export default function App() {
     }
   };
 
+  if (!isLoggedIn) {
+    return (
+      <div className="min-h-screen w-full bg-claude-bg text-claude-text font-sans flex items-center justify-center p-6 relative overflow-hidden">
+        {/* Background effects */}
+        <div className="absolute top-0 left-0 w-full h-full opacity-20 pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-claude-accent rounded-full blur-[120px]" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500 rounded-full blur-[120px]" />
+        </div>
+
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl border border-black/5 relative z-10 space-y-8"
+        >
+          <div className="text-center space-y-2">
+            <div className="w-16 h-16 bg-claude-accent text-white rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg rotate-3">
+              <Radio size={32} />
+            </div>
+            <h1 className="text-3xl font-serif font-bold tracking-tight text-claude-accent">
+              Sonic Event Bridge
+            </h1>
+            <p className="text-claude-muted text-sm font-medium uppercase tracking-[0.15em]">
+              Command Center v2.4
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-claude-muted uppercase tracking-widest px-1">Operator ID</label>
+              <div className="relative">
+                <Users className="absolute left-4 top-1/2 -translate-y-1/2 text-claude-muted" size={18} />
+                <input 
+                  type="text" 
+                  placeholder="Enter Operator ID"
+                  className="w-full pl-12 pr-4 py-4 bg-claude-sidebar rounded-2xl border border-black/5 focus:outline-none focus:ring-2 focus:ring-claude-accent/20 transition-all font-medium"
+                  defaultValue="OP-742-ALPHA"
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-claude-muted uppercase tracking-widest px-1">Security Key</label>
+              <div className="relative">
+                <ShieldAlert className="absolute left-4 top-1/2 -translate-y-1/2 text-claude-muted" size={18} />
+                <input 
+                  type="password" 
+                  placeholder="••••••••"
+                  className="w-full pl-12 pr-4 py-4 bg-claude-sidebar rounded-2xl border border-black/5 focus:outline-none focus:ring-2 focus:ring-claude-accent/20 transition-all font-medium"
+                  defaultValue="password"
+                />
+              </div>
+            </div>
+          </div>
+
+          <button 
+            onClick={() => setIsLoggedIn(true)}
+            className="w-full py-4 bg-claude-accent text-white rounded-2xl font-bold shadow-xl hover:opacity-90 transition-all flex items-center justify-center gap-2 group"
+          >
+            Authenticate & Initialize <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+          </button>
+
+          <div className="text-center">
+            <p className="text-[10px] text-claude-muted font-bold uppercase tracking-widest">
+              Secure Mesh Protocol Active
+            </p>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (isCreatingEvent) {
     return (
       <div className="min-h-screen w-full bg-claude-bg text-claude-text font-sans flex flex-col">
@@ -323,7 +548,7 @@ export default function App() {
             <h1 className="text-lg font-serif font-semibold">Initialize New Event Bridge</h1>
           </div>
           <div className="flex items-center gap-2">
-            {[1, 2, 3, 4, 5, 6].map((step) => (
+            {[1, 2, 3, 4].map((step) => (
               <div 
                 key={step} 
                 className={`w-8 h-1 rounded-full transition-all ${
@@ -364,6 +589,7 @@ export default function App() {
                       <label className="text-xs font-bold uppercase tracking-wider text-claude-muted">Start Date</label>
                       <input 
                         type="date" 
+                        min={today}
                         value={newEventData.startDate}
                         onChange={(e) => setNewEventData({...newEventData, startDate: e.target.value})}
                         className="w-full bg-white border border-black/10 rounded-xl px-4 py-3 focus:ring-1 focus:ring-claude-accent/20 transition-all outline-none"
@@ -373,6 +599,7 @@ export default function App() {
                       <label className="text-xs font-bold uppercase tracking-wider text-claude-muted">End Date</label>
                       <input 
                         type="date" 
+                        min={newEventData.startDate || today}
                         value={newEventData.endDate}
                         onChange={(e) => setNewEventData({...newEventData, endDate: e.target.value})}
                         className="w-full bg-white border border-black/10 rounded-xl px-4 py-3 focus:ring-1 focus:ring-claude-accent/20 transition-all outline-none"
@@ -449,11 +676,11 @@ export default function App() {
                         center={mapCenter} 
                         zoom={16} 
                         style={{ height: '100%', width: '100%' }}
-                        ref={mapRef as any}
+                        ref={(map) => { mapRef.current = map; }}
                       >
                         <TileLayer
-                          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                          attribution='Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
                         />
                         <FeatureGroup>
                           <EditControl
@@ -469,7 +696,7 @@ export default function App() {
                                 allowIntersection: false,
                                 drawError: {
                                   color: '#e1e1e1',
-                                  message: '<strong>Oh snap!<strong> you can\'t draw that!'
+                                  message: '<strong>Error:</strong> Polygon edges cannot cross!'
                                 },
                                 shapeOptions: {
                                   color: '#1D348A'
@@ -478,6 +705,12 @@ export default function App() {
                             }}
                           />
                         </FeatureGroup>
+                        {venuePolygon && (
+                          <Polygon 
+                            positions={venuePolygon}
+                            pathOptions={{ color: '#1D348A', fillOpacity: 0.2, strokeWeight: 2 }}
+                          />
+                        )}
                       </MapContainer>
                       
                       {venueSize && (
@@ -530,7 +763,7 @@ export default function App() {
                   </div>
                   <div className="flex gap-6 h-[500px] relative">
                     {/* Palette */}
-                    <div className="w-48 bg-claude-sidebar rounded-3xl border border-black/5 p-4 space-y-3 overflow-y-auto">
+                    <div className="w-48 bg-claude-sidebar rounded-3xl border border-black/5 p-4 space-y-3 overflow-y-auto relative z-10">
                       <p className="text-[10px] font-bold uppercase tracking-widest text-claude-muted mb-4">Palette</p>
                       {[
                         { type: 'Stage', icon: Radio },
@@ -556,82 +789,57 @@ export default function App() {
                     </div>
                     {/* Map Area */}
                     <div className="flex-1 bg-white rounded-3xl border border-black/5 relative overflow-hidden shadow-inner">
-                      <div className="absolute inset-0 opacity-10 pointer-events-none">
-                        <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
-                          {venuePolygon && (
-                            <polygon 
-                              points={(() => {
-                                // Normalize polygon to fit 0-100
-                                const lats = venuePolygon.map(p => p[0]);
-                                const lngs = venuePolygon.map(p => p[1]);
-                                const minLat = Math.min(...lats);
-                                const maxLat = Math.max(...lats);
-                                const minLng = Math.min(...lngs);
-                                const maxLng = Math.max(...lngs);
-                                
-                                return venuePolygon.map(p => {
-                                  const x = ((p[1] - minLng) / (maxLng - minLng)) * 100;
-                                  const y = 100 - ((p[0] - minLat) / (maxLat - minLat)) * 100;
-                                  return `${x},${y}`;
-                                }).join(' ');
-                              })()}
-                              fill="#1D348A"
-                              fillOpacity="0.1"
-                              stroke="#1D348A"
-                              strokeWidth="0.5"
+                      <MapContainer
+                        center={mapCenter}
+                        zoom={18}
+                        dragging={false}
+                        zoomControl={false}
+                        scrollWheelZoom={false}
+                        doubleClickZoom={false}
+                        touchZoom={false}
+                        attributionControl={false}
+                        style={{ height: '100%', width: '100%', background: 'white' }}
+                      >
+                        <TileLayer
+                          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                        />
+                        <VenueMask polygon={venuePolygon} />
+                        <MapAutoCenter polygon={venuePolygon} padding={[20, 20]} />
+                        {venuePolygon && (
+                          <Polygon 
+                            positions={venuePolygon}
+                            pathOptions={{ color: '#1D348A', fillOpacity: 0, weight: 2 }}
+                          />
+                        )}
+                        {placedElements.map((el) => {
+                          const pos = getLatLngFromXY(el.x, el.y, venuePolygon!);
+                          return (
+                            <LeafletMarker
+                              key={el.id}
+                              position={[pos.lat, pos.lng]}
+                              draggable={true}
+                              eventHandlers={{
+                                dragend: (e) => {
+                                  const marker = e.target;
+                                  const position = marker.getLatLng();
+                                  const { x, y } = getXYFromLatLng(position.lat, position.lng, venuePolygon!);
+                                  setPlacedElements(prev => prev.map(p => p.id === el.id ? { ...p, x, y } : p));
+                                },
+                              }}
                             />
-                          )}
-                        </svg>
-                      </div>
-                      <div className="absolute inset-0 bg-[radial-gradient(#000_1px,transparent_1px)] [background-size:20px_20px] opacity-5" />
-                      
-                      {placedElements.map((el) => (
-                        <motion.div 
-                          key={el.id}
-                          drag
-                          dragMomentum={false}
-                          dragElastic={0}
-                          onDragEnd={(_, info) => {
-                            const rect = dropZoneRef.current?.getBoundingClientRect();
-                            if (rect) {
-                              const x = ((info.point.x - rect.left) / rect.width) * 100;
-                              const y = ((info.point.y - rect.top) / rect.height) * 100;
-                              setPlacedElements(prev => prev.map(p => p.id === el.id ? { ...p, x, y } : p));
-                            }
-                          }}
-                          animate={{ x: 0, y: 0 }}
-                          transition={{ duration: 0 }}
-                          initial={{ scale: 0 }}
-                          style={{ left: `${el.x}%`, top: `${el.y}%` }}
-                          className="absolute -translate-x-1/2 -translate-y-1/2 p-2 bg-claude-accent text-white rounded-lg shadow-lg cursor-grab active:cursor-grabbing flex items-center gap-2 z-10"
-                        >
-                          <MousePointer2 size={12} />
-                          <div className="flex flex-col">
-                            <span className="text-[8px] opacity-70 leading-none">{el.type}</span>
-                            <span className="text-[10px] font-bold leading-tight">{el.name}</span>
-                          </div>
-                          <button 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setPlacedElements(prev => prev.filter(p => p.id !== el.id));
-                            }}
-                            className="p-0.5 hover:bg-white/20 rounded"
-                          >
-                            <X size={10} />
-                          </button>
-                        </motion.div>
-                      ))}
-                      <div ref={dropZoneRef} id="drop-zone" className="absolute inset-0" />
+                          );
+                        })}
+                      </MapContainer>
                       
                       {/* Naming Overlay */}
                       <AnimatePresence>
                         {namingElement && (
-                          <motion.div 
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="absolute inset-0 bg-white/80 backdrop-blur-sm z-50 flex items-center justify-center p-8"
-                          >
+                            <motion.div 
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              className="absolute inset-0 bg-white/80 backdrop-blur-sm z-[1000] flex items-center justify-center p-8"
+                            >
                             <div className="bg-white rounded-3xl border border-black/10 shadow-2xl p-8 max-w-sm w-full space-y-6">
                               <div className="space-y-2">
                                 <h3 className="text-xl font-serif font-bold">Name your {namingElement.type}</h3>
@@ -715,60 +923,47 @@ export default function App() {
                     <p className="text-claude-muted">Calculating optimal Seed-Node placement for ≥95% coverage.</p>
                   </div>
                   <div className="aspect-video bg-white rounded-3xl border border-black/5 relative overflow-hidden shadow-xl">
-                    <div className="absolute inset-0 bg-claude-sidebar/30" />
-                    {/* SVG Venue Plan Result */}
-                    <svg width="100%" height="100%" className="absolute inset-0">
+                    <MapContainer
+                      center={mapCenter}
+                      zoom={18}
+                      dragging={false}
+                      zoomControl={false}
+                      scrollWheelZoom={false}
+                      doubleClickZoom={false}
+                      touchZoom={false}
+                      attributionControl={false}
+                      style={{ height: '100%', width: '100%', background: 'white' }}
+                    >
+                      <TileLayer
+                        url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                      />
+                      <VenueMask polygon={venuePolygon} />
+                      <MapAutoCenter polygon={venuePolygon} padding={[20, 20]} />
                       {venuePolygon && (
-                        <polygon 
-                          points={(() => {
-                            const lats = venuePolygon.map(p => p[0]);
-                            const lngs = venuePolygon.map(p => p[1]);
-                            const minLat = Math.min(...lats);
-                            const maxLat = Math.max(...lats);
-                            const minLng = Math.min(...lngs);
-                            const maxLng = Math.max(...lngs);
-                            
-                            return venuePolygon.map(p => {
-                              const x = ((p[1] - minLng) / (maxLng - minLng)) * 100;
-                              const y = 100 - ((p[0] - minLat) / (maxLat - minLat)) * 100;
-                              return `${x},${y}`;
-                            }).join(' ');
-                          })()}
-                          fill="#1D348A"
-                          fillOpacity="0.05"
-                          stroke="#1D348A"
-                          strokeWidth="1"
-                          strokeDasharray="5 5"
+                        <Polygon 
+                          positions={venuePolygon}
+                          pathOptions={{ color: '#1D348A', fillOpacity: 0, weight: 2 }}
                         />
                       )}
-                      {placedElements.map((el) => (
-                        <g key={el.id} transform={`translate(${el.x}, ${el.y})`}>
-                          <rect x="-10" y="-10" width="20" height="20" fill="#1D348A" rx="4" opacity="0.2" />
-                          <text x="0" y="0" fontSize="4" textAnchor="middle" dominantBaseline="middle" fill="#1D348A" fontWeight="bold">
-                            {el.type.charAt(0)}
-                          </text>
-                        </g>
-                      ))}
-                      {nodes.map((node) => (
-                        <g key={node.id}>
-                          <circle 
-                            cx={`${node.x}%`} 
-                            cy={`${node.y}%`} 
-                            r="40" 
-                            fill="rgba(29, 52, 138, 0.05)" 
-                            stroke="rgba(29, 52, 138, 0.2)" 
-                            strokeWidth="1" 
-                            strokeDasharray="4 2"
+                      {placedElements.map((el) => {
+                        const pos = getLatLngFromXY(el.x, el.y, venuePolygon!);
+                        return (
+                          <LeafletMarker 
+                            key={el.id} 
+                            position={[pos.lat, pos.lng]}
                           />
-                          <circle 
-                            cx={`${node.x}%`} 
-                            cy={`${node.y}%`} 
-                            r="4" 
-                            fill="#1D348A" 
+                        );
+                      })}
+                      {nodes.map((node) => {
+                        const pos = getLatLngFromXY(node.x, node.y, venuePolygon!);
+                        return (
+                          <LeafletMarker 
+                            key={node.id} 
+                            position={[pos.lat, pos.lng]}
                           />
-                        </g>
-                      ))}
-                    </svg>
+                        );
+                      })}
+                    </MapContainer>
                     {isAiPlanning && (
                       <div className="absolute inset-0 bg-white/60 backdrop-blur-sm flex flex-col items-center justify-center gap-4 z-50">
                         <div className="w-12 h-12 border-4 border-claude-accent border-t-transparent rounded-full animate-spin" />
@@ -789,120 +984,8 @@ export default function App() {
                   </div>
                   <div className="flex gap-4">
                     <button onClick={prevStep} className="flex-1 py-4 bg-black/5 text-claude-text rounded-2xl font-semibold hover:bg-black/10 transition-all">Back</button>
-                    <button onClick={nextStep} className="flex-[2] py-4 bg-claude-accent text-white rounded-2xl font-semibold shadow-lg hover:opacity-90 transition-all">Initialize Network Validation</button>
+                    <button onClick={finalizeEvent} className="flex-[2] py-4 bg-claude-accent text-white rounded-2xl font-semibold shadow-lg hover:opacity-90 transition-all">Finalize & Go-Live</button>
                   </div>
-                </motion.div>
-              )}
-
-              {creationStep === 5 && (
-                <motion.div 
-                  key="step5"
-                  initial={{ opacity: 0, x: 20 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -20 }}
-                  className="space-y-8"
-                >
-                  <div className="space-y-2">
-                    <h2 className="text-3xl font-serif font-semibold">Schritt 5: Network-Validation</h2>
-                    <p className="text-claude-muted">Live packet testing. Flagging coverage gaps for field teams.</p>
-                  </div>
-                  <div className="grid grid-cols-3 gap-4">
-                    <div className="col-span-2 bg-white rounded-3xl border border-black/5 p-6 h-[400px] relative overflow-hidden">
-                      <div className="flex items-center justify-between mb-6">
-                        <h4 className="text-sm font-bold uppercase tracking-wider">Live Signal Map</h4>
-                        <div className="flex items-center gap-2 text-xs text-emerald-600 font-bold">
-                          <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                          Testing Packets...
-                        </div>
-                      </div>
-                      <div className="relative h-full">
-                        {nodes.map((node) => (
-                          <div 
-                            key={node.id}
-                            style={{ left: `${node.x}%`, top: `${node.y}%` }}
-                            className="absolute -translate-x-1/2 -translate-y-1/2 group"
-                          >
-                            <div className={`w-3 h-3 rounded-full ${
-                              node.status === 'online' ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]'
-                            }`} />
-                            <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-black text-white text-[8px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                              Node #{node.id} - {node.status === 'online' ? '-42 dBm' : '-78 dBm'}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="space-y-4">
-                      <div className="bg-white rounded-3xl border border-black/5 p-5 space-y-4">
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-claude-muted">Field Recommendations</h4>
-                        <div className="space-y-3">
-                          {nodes.filter(n => n.status === 'warning').map(n => (
-                            <div key={n.id} className="p-3 bg-amber-50 rounded-xl border border-amber-100 flex gap-3">
-                              <AlertCircle size={16} className="text-amber-600 shrink-0" />
-                              <div className="space-y-1">
-                                <p className="text-[10px] font-bold text-amber-800">Node #{n.id} Weak Signal</p>
-                                <p className="text-[9px] text-amber-700">Relocate 5m North-East to bypass concrete obstruction.</p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="bg-emerald-50 rounded-3xl border border-emerald-100 p-5 flex items-center gap-4">
-                        <div className="p-2 bg-emerald-500 text-white rounded-xl">
-                          <Wifi size={20} />
-                        </div>
-                        <div>
-                          <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">Network Health</p>
-                          <p className="text-lg font-serif font-bold text-emerald-900">Stable</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex gap-4">
-                    <button onClick={prevStep} className="flex-1 py-4 bg-black/5 text-claude-text rounded-2xl font-semibold hover:bg-black/10 transition-all">Back</button>
-                    <button onClick={nextStep} className="flex-[2] py-4 bg-claude-accent text-white rounded-2xl font-semibold shadow-lg hover:opacity-90 transition-all">Finalize & Go-Live</button>
-                  </div>
-                </motion.div>
-              )}
-
-              {creationStep === 6 && (
-                <motion.div 
-                  key="step6"
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  className="text-center space-y-8 py-12"
-                >
-                  <div className="flex justify-center">
-                    <div className="w-24 h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center shadow-inner">
-                      <CheckCircle2 size={48} />
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <h2 className="text-4xl font-serif font-bold">Schritt 6: Go-Live</h2>
-                    <p className="text-claude-muted max-w-md mx-auto">
-                      Venue-Engine initialisiert. SVG-Plan kalibriert. Das Dashboard ist bereit für Echtzeit-RSSI-Daten.
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-3 gap-4 max-w-xl mx-auto">
-                    <div className="p-4 bg-white rounded-2xl border border-black/5 space-y-1">
-                      <p className="text-[10px] font-bold text-claude-muted uppercase tracking-wider">Coordinates</p>
-                      <p className="text-sm font-bold">Set</p>
-                    </div>
-                    <div className="p-4 bg-white rounded-2xl border border-black/5 space-y-1">
-                      <p className="text-[10px] font-bold text-claude-muted uppercase tracking-wider">Heatmap</p>
-                      <p className="text-sm font-bold">Ready</p>
-                    </div>
-                    <div className="p-4 bg-white rounded-2xl border border-black/5 space-y-1">
-                      <p className="text-[10px] font-bold text-claude-muted uppercase tracking-wider">Nodes</p>
-                      <p className="text-sm font-bold">Active</p>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={finalizeEvent}
-                    className="px-12 py-4 bg-claude-accent text-white rounded-2xl font-semibold shadow-xl hover:opacity-90 transition-all flex items-center gap-2 mx-auto"
-                  >
-                    Enter Command Center <ArrowUpRight size={20} />
-                  </button>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -1028,21 +1111,38 @@ export default function App() {
             </div>
 
             <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-              <button
-                className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm bg-black/5 text-claude-text font-medium transition-all"
-              >
-                <div className="flex items-center gap-3">
-                  <LayoutDashboard size={18} className="text-claude-accent" />
-                  <span>Overview</span>
-                </div>
-              </button>
-              <button
-                onClick={() => setSelectedEvent(null)}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-claude-muted hover:bg-black/5 hover:text-claude-text transition-all"
-              >
-                <ArrowLeft size={18} />
-                <span>Switch Event</span>
-              </button>
+              {[
+                { id: 'live', label: 'Live Map', icon: MapIcon },
+                { id: 'broadcast', label: 'Broadcast', icon: Megaphone },
+                { id: 'network', label: 'Network Stats', icon: Activity },
+                { id: 'crowd', label: 'Crowd Analytics', icon: Users },
+                { id: 'safety', label: 'Safety & Alerts', icon: ShieldAlert },
+                { id: 'nodes', label: 'Node Management', icon: Radio },
+                { id: 'reports', label: 'Reports', icon: FileText },
+              ].map((page) => (
+                <button
+                  key={page.id}
+                  onClick={() => setDashboardPage(page.id as any)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${
+                    dashboardPage === page.id 
+                      ? 'bg-claude-accent/10 text-claude-accent font-semibold shadow-sm' 
+                      : 'text-claude-muted hover:bg-black/5 hover:text-claude-text'
+                  }`}
+                >
+                  <page.icon size={18} />
+                  <span>{page.label}</span>
+                </button>
+              ))}
+              
+              <div className="pt-4 mt-4 border-t border-black/5">
+                <button
+                  onClick={() => setSelectedEvent(null)}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-claude-muted hover:bg-black/5 hover:text-claude-text transition-all"
+                >
+                  <ArrowLeft size={18} />
+                  <span>Switch Event</span>
+                </button>
+              </div>
             </nav>
 
             <div className="p-4 border-t border-black/5">
@@ -1094,127 +1194,193 @@ export default function App() {
 
         {/* Dashboard Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-8">
-          <div className="max-w-4xl mx-auto space-y-8">
-            <div className="flex items-center justify-between">
-              <div className="space-y-2">
-                <h2 className="text-3xl font-serif font-semibold">Event Overview</h2>
-                <p className="text-claude-muted">Real-time operational status for {selectedEvent.name}.</p>
-              </div>
-              <button 
-                onClick={handleEdit}
-                className="flex items-center gap-2 px-4 py-2 bg-white border border-black/5 rounded-xl text-sm font-medium hover:bg-black/5 transition-all"
-              >
-                <Settings size={16} />
-                <span>Edit Event Details</span>
-              </button>
-            </div>
-
-            {isEditing && editData && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                className="bg-white p-6 rounded-3xl border border-black/5 shadow-sm space-y-6 overflow-hidden"
-              >
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-serif font-semibold">Edit Event Configuration</h3>
-                  <button onClick={() => setIsEditing(false)} className="text-claude-muted hover:text-claude-text">
-                    <X size={20} />
-                  </button>
+          <div className="max-w-6xl mx-auto space-y-8">
+            {dashboardPage === 'live' ? (
+              <div className="space-y-6">
+                {/* Top Metrics */}
+                <div className="grid grid-cols-4 gap-4">
+                  {[
+                    { label: 'Active Nodes', value: `${nodes.length || 24}/${nodes.length || 24}`, icon: Radio, trend: '100%', color: 'emerald' },
+                    { label: 'Stability', value: '99.8%', icon: Activity, trend: '+0.2%', color: 'blue' },
+                    { label: 'Mesh Coverage', value: '94.2%', icon: Layers, trend: 'Optimal', color: 'indigo' },
+                    { label: 'Avg. Latency', value: '12ms', icon: MousePointer2, trend: '-2ms', color: 'amber' },
+                  ].map((stat) => (
+                    <div key={stat.label} className="bg-white p-5 rounded-3xl border border-black/5 shadow-sm space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className={`p-2 rounded-xl ${
+                          stat.color === 'emerald' ? 'bg-emerald-50 text-emerald-600' :
+                          stat.color === 'blue' ? 'bg-blue-50 text-blue-600' :
+                          stat.color === 'indigo' ? 'bg-indigo-50 text-indigo-600' :
+                          'bg-amber-50 text-amber-600'
+                        }`}>
+                          <stat.icon size={18} />
+                        </div>
+                        <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">{stat.trend}</span>
+                      </div>
+                      <div>
+                        <p className="text-xs text-claude-muted font-medium">{stat.label}</p>
+                        <p className="text-2xl font-serif font-bold">{stat.value}</p>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold uppercase text-claude-muted">Event Name</label>
-                    <input 
-                      type="text" 
-                      value={editData.name}
-                      onChange={(e) => setEditData({...editData, name: e.target.value})}
-                      className="w-full bg-claude-bg border border-black/5 rounded-xl px-4 py-2 text-sm outline-none focus:ring-1 focus:ring-claude-accent/20"
-                    />
+
+                {/* Main Content Area */}
+                <div className="flex gap-6 h-[600px]">
+                  {/* Live Map with Heatmap */}
+                  <div className="flex-1 bg-white rounded-[40px] border border-black/5 shadow-xl relative overflow-hidden">
+                    <div className="absolute top-6 left-6 z-20 flex items-center gap-3">
+                      <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-2xl border border-black/5 shadow-lg flex items-center gap-3">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                          <span className="text-xs font-bold uppercase tracking-wider">Live Feed</span>
+                        </div>
+                        <div className="h-4 w-px bg-black/10" />
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-claude-muted font-bold">DENSITY:</span>
+                          <div className="flex gap-1">
+                            <div className="w-3 h-1.5 bg-blue-500 rounded-full" />
+                            <div className="w-3 h-1.5 bg-orange-500 rounded-full" />
+                            <div className="w-3 h-1.5 bg-red-500 rounded-full" />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="absolute inset-0 z-0">
+                      <MapContainer
+                        center={mapCenter}
+                        zoom={18}
+                        style={{ height: '100%', width: '100%' }}
+                      >
+                        <TileLayer
+                          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                          attribution='Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                        />
+                        <MapAutoCenter polygon={selectedEvent?.venuePolygon || null} />
+                        {selectedEvent?.venuePolygon && (
+                          <Polygon 
+                            positions={selectedEvent.venuePolygon}
+                            pathOptions={{ color: '#1D348A', fillOpacity: 0.05, weight: 1 }}
+                          />
+                        )}
+                        
+                        {/* Coverage Gaps */}
+                        {coverageGaps.map(gap => {
+                          const pos = getLatLngFromXY(gap.x, gap.y, selectedEvent?.venuePolygon || []);
+                          return (
+                            <Polygon
+                              key={gap.id}
+                              positions={[
+                                [pos.lat - 0.0001, pos.lng - 0.0001],
+                                [pos.lat + 0.0001, pos.lng - 0.0001],
+                                [pos.lat + 0.0001, pos.lng + 0.0001],
+                                [pos.lat - 0.0001, pos.lng + 0.0001]
+                              ]}
+                              pathOptions={{ color: '#ef4444', fillOpacity: 0.3, weight: 1 }}
+                            />
+                          );
+                        })}
+
+                        {/* Heatmap Layer */}
+                        {selectedEvent?.venuePolygon && (
+                          <HeatmapLayer 
+                            points={crowdBlobs.map(blob => {
+                              const pos = getLatLngFromXY(blob.x, blob.y, selectedEvent.venuePolygon!);
+                              const intensityValue = blob.intensity === 'critical' ? 1.0 : blob.intensity === 'high' ? 0.8 : blob.intensity === 'med' ? 0.5 : 0.2;
+                              return [pos.lat, pos.lng, intensityValue] as [number, number, number];
+                            })} 
+                          />
+                        )}
+
+                        {/* Nodes */}
+                        {nodes.map((node) => {
+                          const pos = getLatLngFromXY(node.x, node.y, selectedEvent?.venuePolygon || []);
+                          return (
+                            <LeafletMarker 
+                              key={node.id} 
+                              position={[pos.lat, pos.lng]}
+                            />
+                          );
+                        })}
+                      </MapContainer>
+                    </div>
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold uppercase text-claude-muted">Location</label>
-                    <input 
-                      type="text" 
-                      value={editData.location}
-                      onChange={(e) => setEditData({...editData, location: e.target.value})}
-                      className="w-full bg-claude-bg border border-black/5 rounded-xl px-4 py-2 text-sm outline-none focus:ring-1 focus:ring-claude-accent/20"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold uppercase text-claude-muted">Start Date</label>
-                    <input 
-                      type="date" 
-                      value={editData.startDate}
-                      onChange={(e) => setEditData({...editData, startDate: e.target.value})}
-                      className="w-full bg-claude-bg border border-black/5 rounded-xl px-4 py-2 text-sm outline-none focus:ring-1 focus:ring-claude-accent/20"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold uppercase text-claude-muted">End Date</label>
-                    <input 
-                      type="date" 
-                      value={editData.endDate}
-                      onChange={(e) => setEditData({...editData, endDate: e.target.value})}
-                      className="w-full bg-claude-bg border border-black/5 rounded-xl px-4 py-2 text-sm outline-none focus:ring-1 focus:ring-claude-accent/20"
-                    />
+
+                  {/* Right Panel */}
+                  <div className="w-80 space-y-4 flex flex-col">
+                    {/* Quick Broadcast */}
+                    <div className="bg-claude-accent text-white p-6 rounded-[32px] shadow-lg space-y-4 relative overflow-hidden group">
+                      <div className="absolute -right-4 -top-4 w-24 h-24 bg-white/10 rounded-full blur-2xl group-hover:scale-150 transition-transform duration-700" />
+                      <div className="flex items-center gap-3 relative z-10">
+                        <div className="p-2 bg-white/20 rounded-xl">
+                          <Megaphone size={20} />
+                        </div>
+                        <h4 className="font-bold">Quick Broadcast</h4>
+                      </div>
+                      <p className="text-xs text-white/70 relative z-10">Send emergency alerts to all connected mesh nodes instantly.</p>
+                      <button className="w-full py-3 bg-white text-claude-accent rounded-xl font-bold hover:bg-white/90 transition-all flex items-center justify-center gap-2 relative z-10 active:scale-95">
+                        <Send size={16} />
+                        Broadcast Alert
+                      </button>
+                    </div>
+
+                    {/* Node Overview */}
+                    <div className="bg-white p-6 rounded-[32px] border border-black/5 shadow-sm flex-1 flex flex-col min-h-0">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-xs font-bold uppercase tracking-widest text-claude-muted">Critical Alerts</h4>
+                          <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                        </div>
+                        <span className="text-[10px] font-bold text-red-600">{coverageGaps.length} GAPS FOUND</span>
+                      </div>
+                      <div className="space-y-3 overflow-y-auto pr-2 custom-scrollbar flex-1">
+                        {coverageGaps.map((gap) => (
+                          <div key={gap.id} className="p-3 bg-red-50 rounded-2xl border border-red-100 space-y-2">
+                            <div className="flex items-center gap-2">
+                              <ShieldAlert size={14} className="text-red-600" />
+                              <p className="text-[10px] font-bold text-red-800 uppercase tracking-tight">{gap.reason}</p>
+                            </div>
+                            <p className="text-[9px] text-red-700 font-medium">Low signal density detected. Placement of a bridge node recommended to maintain mesh integrity.</p>
+                            <button className="w-full py-1.5 bg-red-600 text-white rounded-lg text-[9px] font-bold uppercase tracking-wider hover:bg-red-700 transition-colors">
+                              Deploy AI Planner
+                            </button>
+                          </div>
+                        ))}
+                        <div className="h-px bg-black/5 my-2" />
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-[10px] font-bold uppercase tracking-widest text-claude-muted">Active Nodes</h4>
+                        </div>
+                        {(nodes.length > 0 ? nodes : Array.from({length: 8}).map((_, i) => ({id: i+100, x: 0, y: 0}))).map((node) => (
+                          <div key={node.id} className="flex items-center justify-between p-3 bg-claude-sidebar rounded-2xl border border-black/5 hover:border-claude-accent/20 transition-colors group">
+                            <div className="flex items-center gap-3">
+                              <div className="w-2 h-2 bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.4)]" />
+                              <div>
+                                <p className="text-[10px] font-bold group-hover:text-claude-accent transition-colors">NODE #{node.id}</p>
+                                <p className="text-[8px] text-claude-muted uppercase font-semibold">Seed Node • {Math.floor(Math.random() * 20 + 80)}% Bat.</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] font-mono font-bold">-{Math.floor(Math.random() * 20 + 30)} dBm</p>
+                              <p className="text-[8px] text-emerald-600 font-bold uppercase">Stable</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </div>
-                <div className="flex justify-end gap-3 pt-2">
-                  <button 
-                    onClick={() => setIsEditing(false)}
-                    className="px-4 py-2 text-sm font-medium text-claude-muted hover:text-claude-text"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={saveEdit}
-                    className="px-6 py-2 bg-claude-accent text-white rounded-xl text-sm font-medium shadow-sm hover:opacity-90 transition-all"
-                  >
-                    Save Changes
-                  </button>
+              </div>
+            ) : dashboardPage === 'broadcast' ? (
+                <BroadcastPage nodesCount={nodes.length || 24} />
+              ) : (
+                <div className="flex items-center justify-center h-[600px] bg-white rounded-[40px] border border-black/5 text-claude-muted italic">
+                  Page "{dashboardPage}" is under construction.
                 </div>
-              </motion.div>
-            )}
-
-            {/* Stats Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {[
-                { label: 'Attendance', value: selectedEvent.attendance, icon: Users, color: 'text-blue-600' },
-                { label: 'Active Staff', value: '124', icon: ShieldAlert, color: 'text-emerald-600' },
-                { label: 'Open Incidents', value: '3', icon: AlertCircle, color: 'text-red-600' },
-                { label: 'Capacity', value: '82%', icon: Activity, color: 'text-amber-600' },
-              ].map((stat, i) => (
-                <motion.div 
-                  key={i}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.1 }}
-                  className="bg-white p-5 rounded-2xl border border-black/5 shadow-sm"
-                >
-                  <div className={`p-2 rounded-xl bg-black/5 w-fit mb-3 ${stat.color}`}>
-                    <stat.icon size={20} />
-                  </div>
-                  <p className="text-2xl font-serif font-bold text-claude-text">{stat.value}</p>
-                  <p className="text-xs text-claude-muted mt-1">{stat.label}</p>
-                </motion.div>
-              ))}
-            </div>
-
-            {/* Placeholder for future modules */}
-            <div className="p-12 border-2 border-dashed border-black/5 rounded-3xl flex flex-col items-center justify-center text-center space-y-4">
-              <div className="p-4 bg-black/5 rounded-full text-claude-muted">
-                <LayoutDashboard size={32} />
-              </div>
-              <div className="space-y-1">
-                <p className="font-medium text-claude-text">Ready for new modules</p>
-                <p className="text-sm text-claude-muted max-w-xs mx-auto">
-                  The dashboard is minimized. Start adding specialized operational features one by one.
-                </p>
-              </div>
+              )}
             </div>
           </div>
-        </div>
-      </main>
-    </div>
-  );
+        </main>
+      </div>
+    );
 }
